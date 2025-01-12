@@ -1,0 +1,170 @@
+pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git
+from tvDatafeed import TvDatafeed, Interval
+
+username = 'YourTradingViewUsername'
+password = 'YourTradingViewPassword'
+
+tv = TvDatafeed(username, password)
+
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from sklearn.preprocessing import MinMaxScaler
+import matplotlib.pyplot as plt
+
+# Step 1: Fetch NIFTY50 data using tvdatafeed
+# You need to log in using a TradingView username and password
+# Replace 'username' and 'password' with your TradingView credentials
+
+# Uncomment and configure your credentials
+tv = TvDatafeed('username', 'password')
+
+# Fetching NIFTY50 stock data
+def fetch_stock_data(symbol, interval=Interval.in_daily, n_bars=5000):
+    try:
+        data = tv.get_hist(symbol=symbol, exchange='NSE', interval=interval, n_bars=n_bars)
+        return data
+    except Exception as e:
+        print(f"Error fetching data for {symbol}: {e}")
+        return None
+
+# Calculate MACD, Signal line, and generate position column
+def calculate_macd(df):
+    df['EMA_12'] = df['close'].ewm(span=12, adjust=False).mean()
+    df['EMA_26'] = df['close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = df['EMA_12'] - df['EMA_26']
+    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['Position'] = np.where(df['MACD'] > df['Signal_Line'], 1, \
+                              np.where(df['MACD'] < df['Signal_Line'], -1, 0))
+    return df
+
+# Add RSI calculation to the dataframe
+def calculate_rsi(df, period=14):
+    delta = df['close'].diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+
+    avg_gain = pd.Series(gain).rolling(window=period).mean()
+    avg_loss = pd.Series(loss).rolling(window=period).mean()
+    rs = avg_gain / avg_loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    return df
+
+# Save CSV files for all 50 stocks with calculated indicators
+def process_and_save_stocks(stock_symbols):
+    for symbol in stock_symbols:
+        data = fetch_stock_data(symbol)
+        if data is not None:
+            data = calculate_macd(data)
+            data = calculate_rsi(data)
+            data.to_csv(f"{symbol}.csv")
+            print(f"Saved {symbol}.csv")
+
+# Example usage
+# nifty50_symbols = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', ...] # Add all NIFTY50 symbols
+# process_and_save_stocks(nifty50_symbols)
+
+# Step 2: MockBroker Class Implementation
+class MockBroker:
+    def __init__(self, balance, price_dict):
+        self.balance = balance
+        self.holdings = {}
+        self.price_dict = price_dict
+        
+    def buy(self, symbol, amount):
+        price = self.price_dict[symbol][-1]  # Last closing price
+        num_shares = amount // price
+        cost = num_shares * price
+        if cost > self.balance:
+            raise ValueError("Insufficient balance to buy")
+        self.balance -= cost
+        self.holdings[symbol] = self.holdings.get(symbol, 0) + num_shares
+
+    def sell(self, symbol, amount):
+        if symbol not in self.holdings or self.holdings[symbol] == 0:
+            raise ValueError("No holdings to sell")
+        price = self.price_dict[symbol][-1]  # Last closing price
+        num_shares = amount // price
+        num_shares = min(num_shares, self.holdings[symbol])  # Limit shares to holdings
+        revenue = num_shares * price
+        self.balance += revenue
+        self.holdings[symbol] -= num_shares
+        if self.holdings[symbol] == 0:
+            del self.holdings[symbol]
+
+    def __str__(self):
+        total_value = sum(
+            self.holdings[symbol] * self.price_dict[symbol][-1] for symbol in self.holdings
+        )
+        net_worth = self.balance + total_value
+        return f"Balance: {self.balance:.2f}, Holdings: {self.holdings}, Net Worth: {net_worth:.2f}"
+
+# Step 3: Neural Network Implementation
+# Example LSTM implementation
+
+def train_lstm_model(training_data):
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaled_data = scaler.fit_transform(training_data)
+
+    # Prepare input features for LSTM
+    x_train = []
+    y_train = []
+
+    for i in range(60, len(scaled_data) - 500):
+        x_train.append(scaled_data[i-60:i, 0])  # Past 60 days as features
+        y_train.append(scaled_data[i, 0])  # Current day close as target
+
+    x_train, y_train = np.array(x_train), np.array(y_train)
+    x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+
+    model = tf.keras.Sequential([
+        tf.keras.layers.LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1)),
+        tf.keras.layers.LSTM(units=50, return_sequences=False),
+        tf.keras.layers.Dense(units=25),
+        tf.keras.layers.Dense(units=1)
+    ])
+
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    model.fit(x_train, y_train, batch_size=1, epochs=5)
+    return model, scaler
+
+# Backtesting with MockBroker and LSTM predictions
+def backtest_with_mockbroker(stock_data, model, scaler, price_dict):
+    broker = MockBroker(balance=100000, price_dict=price_dict)
+
+    for symbol, data in stock_data.items():
+        # Normalize and prepare data for prediction
+        scaled_data = scaler.transform(data[['close']].values)
+        x_test = []
+        for i in range(60, len(scaled_data)):
+            x_test.append(scaled_data[i-60:i, 0])
+        x_test = np.array(x_test)
+        x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
+
+        predictions = model.predict(x_test)
+        predictions = scaler.inverse_transform(predictions)
+
+        # Example strategy: Buy if prediction > current price
+        for i in range(len(predictions)):
+            predicted_price = predictions[i][0]
+            current_price = data.iloc[60 + i]['close']
+
+            if predicted_price > current_price:
+                broker.buy(symbol, broker.balance * 0.1)  # 10% of balance
+            elif predicted_price < current_price and symbol in broker.holdings:
+                broker.sell(symbol, broker.holdings[symbol])
+
+    return broker
+
+# Running backtesting and calculating CAGR
+def calculate_cagr(initial_balance, final_balance, years=2):
+    return ((final_balance / initial_balance) ** (1 / years)) - 1
+
+# Example usage for backtesting
+# nifty50_price_dict = {symbol: fetch_stock_data(symbol)['close'].values for symbol in nifty50_symbols}
+# trained_model, trained_scaler = train_lstm_model(training_data)
+# final_broker = backtest_with_mockbroker(stock_data, trained_model, trained_scaler, nifty50_price_dict)
+# print(final_broker)
+# cagr = calculate_cagr(100000, final_broker.balance + sum(final_broker.holdings.values()))
+# print(f"CAGR: {cagr:.2%}")
